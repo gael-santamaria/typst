@@ -65,9 +65,9 @@ top to bottom. It will automatically add enough rows to your table so that it
 fits all of your content.
 
 It is best to wrap the header row of your table in the [`table.header`
-function]($table.header). This clarifies your intent and will also allow future
-versions of Typst to make the output more accessible to users with a screen
-reader:
+function]($table.header). This clarifies your intent and will also allow Typst
+to make the output more [accessible]($guides/accessibility) to users with a
+screen reader:
 
 ```example
 #table(
@@ -800,9 +800,9 @@ calendar.
 >>>
 >>> #show table.cell.where(y: 0): strong
 #set table(stroke: (x, y) => (
-  left: if x == 0 or y > 0 { 1pt } else { 0pt },
+  left: if x == 0 or y > 0 { 1pt } else { 0pt },
   right: 1pt,
-  top: if y <= 1 { 1pt } else { 0pt },
+  top: if y <= 1 { 1pt } else { 0pt },
   bottom: 1pt,
 ))
 
@@ -1037,7 +1037,7 @@ on the right of the table.
     inset: (x: 0.6em,),
     stroke: (_, y) => (
       x: 1pt,
-      top: if y <= 1 { 1pt } else { 0pt },
+      top: if y <= 1 { 1pt } else { 0pt },
       bottom: 1pt,
     ),
     align: (left, right, right, right, right, left),
@@ -1090,7 +1090,7 @@ upright:
     inset: (x: 0.6em,),
     stroke: (_, y) => (
       x: 1pt,
-      top: if y <= 1 { 1pt } else { 0pt },
+      top: if y <= 1 { 1pt } else { 0pt },
       bottom: 1pt,
     ),
     align: (left, right, right, right, right, left),

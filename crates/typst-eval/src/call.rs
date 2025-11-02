@@ -2,13 +2,12 @@ use comemo::{Tracked, TrackedMut};
 use ecow::{EcoString, EcoVec, eco_format};
 use typst_library::World;
 use typst_library::diag::{
-    At, HintedStrResult, HintedString, SourceDiagnostic, SourceResult, Trace, Tracepoint,
-    bail, error,
+    At, HintedStrResult, SourceDiagnostic, SourceResult, Trace, Tracepoint, bail, error,
 };
 use typst_library::engine::{Engine, Sink, Traced};
 use typst_library::foundations::{
-    Arg, Args, Binding, Capturer, Closure, Content, Context, Func, NativeElement, Scope,
-    Scopes, SymbolElem, Value,
+    Arg, Args, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
+    NativeElement, Scope, Scopes, SymbolElem, Value,
 };
 use typst_library::introspection::Introspector;
 use typst_library::math::LrElem;
@@ -17,7 +16,10 @@ use typst_syntax::ast::{self, AstNode, Ident};
 use typst_syntax::{Span, Spanned, SyntaxNode};
 use typst_utils::LazyHash;
 
-use crate::{Access, Eval, FlowEvent, Route, Vm, call_method_mut, is_mutating_method};
+use crate::{
+    Access, Eval, FlowEvent, Route, Vm, call_method_mut, hint_if_shadowed_std,
+    is_mutating_method,
+};
 
 impl Eval for ast::FuncCall<'_> {
     type Output = Value;
@@ -154,7 +156,7 @@ impl Eval for ast::Closure<'_> {
 
         // Define the closure.
         let closure = Closure {
-            node: self.to_untyped().clone(),
+            node: ClosureNode::Closure(self.to_untyped().clone()),
             defaults,
             captured,
             num_pos_params: self
@@ -183,9 +185,15 @@ pub fn eval_closure(
     context: Tracked<Context>,
     mut args: Args,
 ) -> SourceResult<Value> {
-    let (name, params, body) = match closure.node.cast::<ast::Closure>() {
-        Some(node) => (node.name(), node.params(), node.body()),
-        None => (None, ast::Params::default(), closure.node.cast().unwrap()),
+    let (name, params, body) = match closure.node {
+        ClosureNode::Closure(ref node) => {
+            let closure =
+                node.cast::<ast::Closure>().expect("node to be an `ast::Closure`");
+            (closure.name(), closure.params(), closure.body())
+        }
+        ClosureNode::Context(ref node) => {
+            (None, ast::Params::default(), node.cast().unwrap())
+        }
     };
 
     // Don't leak the scopes from the call site. Instead, we use the scope
@@ -424,23 +432,6 @@ fn wrap_args_in_math(
 
     args.finish()?;
     Ok(Value::Content(formatted))
-}
-
-/// Provide a hint if the callee is a shadowed standard library function.
-fn hint_if_shadowed_std(
-    vm: &mut Vm,
-    callee: &ast::Expr,
-    mut err: HintedString,
-) -> HintedString {
-    if let ast::Expr::Ident(ident) = callee {
-        let ident = ident.get();
-        if vm.scopes.check_std_shadowed(ident) {
-            err.hint(eco_format!(
-                "use `std.{ident}` to access the shadowed standard library function",
-            ));
-        }
-    }
-    err
 }
 
 /// A visitor that determines which variables to capture for a closure.

@@ -10,7 +10,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     rust-manifest = {
-      url = "https://static.rust-lang.org/dist/channel-rust-1.89.0.toml";
+      url = "https://static.rust-lang.org/dist/channel-rust-1.91.0.toml";
       flake = false;
     };
   };
@@ -102,12 +102,8 @@
               '';
 
               GEN_ARTIFACTS = "artifacts";
-              TYPST_VERSION =
-                let
-                  rev = self.shortRev or "dirty";
-                  version = cargoToml.workspace.package.version;
-                in
-                "${version} (${rev})";
+              TYPST_VERSION = cargoToml.workspace.package.version;
+              TYPST_COMMIT_SHA = self.shortRev or "dirty";
 
               meta.mainProgram = "typst";
             }

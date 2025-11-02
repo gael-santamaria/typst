@@ -1,13 +1,16 @@
 use std::mem;
-use std::ops::{Index, IndexMut, Range};
+use std::ops::{DerefMut, Index, IndexMut, Range};
 
 use ecow::{EcoString, eco_format};
 use rustc_hash::{FxHashMap, FxHashSet};
-use typst_utils::default_math_class;
+use typst_utils::{default_math_class, defer};
 use unicode_math_class::MathClass;
 
 use crate::set::{SyntaxSet, syntax_set};
 use crate::{Lexer, SyntaxError, SyntaxKind, SyntaxMode, SyntaxNode, ast, set};
+
+// Picked by gut feeling.
+const MAX_DEPTH: u32 = 256;
 
 /// Parses a source file as top-level markup.
 pub fn parse(text: &str) -> SyntaxNode {
@@ -46,6 +49,8 @@ fn markup(p: &mut Parser, at_start: bool, wrap_trivia: bool, stop_set: SyntaxSet
 /// Parses a sequence of markup expressions.
 fn markup_exprs(p: &mut Parser, mut at_start: bool, stop_set: SyntaxSet) {
     debug_assert!(stop_set.contains(SyntaxKind::End));
+    let Some(p) = p.check_depth_until(stop_set) else { return };
+
     at_start |= p.had_newline();
     let mut nesting: usize = 0;
     // Keep going if we're at a nested right-bracket regardless of the stop set.
@@ -80,6 +85,8 @@ pub(super) fn reparse_markup(
 /// headings, strong/emph, lists/enums, etc. This is also the entry point for
 /// parsing math equations and embedded code expressions.
 fn markup_expr(p: &mut Parser, at_start: bool, nesting: &mut usize) {
+    let Some(p) = &mut p.increase_depth() else { return };
+
     match p.current() {
         SyntaxKind::LeftBracket => {
             *nesting += 1;
@@ -224,6 +231,8 @@ fn math(p: &mut Parser, stop_set: SyntaxSet) {
 /// parsed.
 fn math_exprs(p: &mut Parser, stop_set: SyntaxSet) -> usize {
     debug_assert!(stop_set.contains(SyntaxKind::End));
+    let Some(p) = p.check_depth_until(stop_set) else { return 1 };
+
     let mut count = 0;
     while !p.at_set(stop_set) {
         if p.at_set(set::MATH_EXPR) {
@@ -244,6 +253,8 @@ fn math_expr(p: &mut Parser) {
 
 /// Parses a math expression with at least the given precedence.
 fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
+    let Some(p) = &mut p.increase_depth() else { return };
+
     let m = p.marker();
     let mut continuable = false;
     match p.current() {
@@ -384,10 +395,10 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
 fn math_op(kind: SyntaxKind) -> Option<(SyntaxKind, SyntaxKind, ast::Assoc, usize)> {
     match kind {
         SyntaxKind::Underscore => {
-            Some((SyntaxKind::MathAttach, SyntaxKind::Hat, ast::Assoc::Right, 3))
+            Some((SyntaxKind::MathAttach, SyntaxKind::Hat, ast::Assoc::Right, 2))
         }
         SyntaxKind::Hat => {
-            Some((SyntaxKind::MathAttach, SyntaxKind::Underscore, ast::Assoc::Right, 3))
+            Some((SyntaxKind::MathAttach, SyntaxKind::Underscore, ast::Assoc::Right, 2))
         }
         SyntaxKind::Slash => {
             Some((SyntaxKind::MathFrac, SyntaxKind::End, ast::Assoc::Left, 1))
@@ -531,8 +542,22 @@ fn math_arg<'s>(p: &mut Parser<'s>, seen: &mut FxHashSet<&'s str>) -> bool {
         if let Some(spread) = p.lexer.maybe_math_spread_arg(start) {
             p.token.node = spread;
             p.eat();
-            math_expr(p);
-            p.wrap(m, SyntaxKind::Spread);
+            let m_arg = p.marker();
+            // TODO: Refactor to combine with the other call to `math_exprs`.
+            let count =
+                math_exprs(p, syntax_set!(End, Dollar, Comma, Semicolon, RightParen));
+            if count == 0 {
+                let dots = vec![
+                    SyntaxNode::leaf(SyntaxKind::MathText, "."),
+                    SyntaxNode::leaf(SyntaxKind::MathText, "."),
+                ];
+                p[m] = SyntaxNode::inner(SyntaxKind::Math, dots);
+            } else {
+                if count > 1 {
+                    p.wrap(m_arg, SyntaxKind::Math);
+                }
+                p.wrap(m, SyntaxKind::Spread);
+            }
             return true;
         }
     }
@@ -596,6 +621,8 @@ fn code(p: &mut Parser, stop_set: SyntaxSet) {
 /// Parses a sequence of code expressions.
 fn code_exprs(p: &mut Parser, stop_set: SyntaxSet) {
     debug_assert!(stop_set.contains(SyntaxKind::End));
+    let Some(p) = p.check_depth_until(stop_set) else { return };
+
     while !p.at_set(stop_set) {
         p.with_nl_mode(AtNewline::ContextualContinue, |p| {
             if !p.at_set(set::CODE_EXPR) {
@@ -647,7 +674,9 @@ fn code_expr(p: &mut Parser) {
 }
 
 /// Parses a code expression with at least the given precedence.
-fn code_expr_prec(p: &mut Parser, atomic: bool, min_prec: usize) {
+fn code_expr_prec(p: &mut Parser, atomic: bool, min_prec: u8) {
+    let Some(p) = &mut p.increase_depth() else { return };
+
     let m = p.marker();
     if !atomic && p.at_set(set::UNARY_OP) {
         let op = ast::UnOp::from_kind(p.current()).unwrap();
@@ -1361,6 +1390,8 @@ fn pattern<'s>(
     seen: &mut FxHashSet<&'s str>,
     dupe: Option<&'s str>,
 ) {
+    let Some(p) = &mut p.increase_depth() else { return };
+
     match p.current() {
         SyntaxKind::Underscore => p.eat(),
         SyntaxKind::LeftParen => destructuring_or_parenthesized(p, reassignment, seen),
@@ -1549,6 +1580,8 @@ struct Parser<'s> {
     /// backtracking similar to packrat parsing. See comments above in
     /// [`expr_with_paren`].
     memo: MemoArena,
+    /// The current expression nesting depth.
+    depth: u32,
 }
 
 /// A single token returned from the lexer with a cached [`SyntaxKind`] and a
@@ -1572,7 +1605,7 @@ struct Token {
 }
 
 /// Information about newlines in a group of trivia.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Copy, Clone)]
 struct Newline {
     /// The column of the start of the next token in its line.
     column: Option<usize>,
@@ -1581,7 +1614,7 @@ struct Newline {
 }
 
 /// How to proceed with parsing when at a newline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum AtNewline {
     /// Continue at newlines.
     Continue,
@@ -1658,6 +1691,7 @@ impl<'s> Parser<'s> {
             balanced: true,
             nodes,
             memo: Default::default(),
+            depth: 0,
         }
     }
 
@@ -1823,6 +1857,19 @@ impl<'s> Parser<'s> {
         let from = from.0.min(to);
         let children = self.nodes.drain(from..to).collect();
         self.nodes.insert(from, SyntaxNode::inner(kind, children));
+    }
+
+    /// Wrap the nodes from a marker up to (but excluding) the current token in
+    /// a new [error node](`SyntaxNode::error`) with the given message. This is
+    /// an easy interface for creating a syntax error _after_ having parsed its
+    /// children.
+    fn wrap_error(&mut self, from: Marker, message: impl Into<EcoString>) {
+        let to = self.before_trivia().0;
+        let from = from.0.min(to);
+        let text: EcoString =
+            self.nodes.drain(from..to).map(SyntaxNode::into_text).collect();
+        self.nodes
+            .insert(from, SyntaxNode::error(SyntaxError::new(message), text));
     }
 
     /// Parse within the [`SyntaxMode`] for subsequent tokens (does not change the
@@ -2073,5 +2120,63 @@ impl Parser<'_> {
             start -= 1;
         }
         self.nodes.drain(start..end);
+    }
+
+    /// Check if the maximum depth has been exceeded. If so, generate an error
+    /// and try to make a best effort recovery using the `stop_set` as a guide.
+    ///
+    /// This function isn't strictly necessary, but it is an optimization to
+    /// generate one combined error instead of an error message for every
+    /// balanced set of tokens. In the pathological case an error would be
+    /// generated by [`Self::increase_depth`] for every single token until
+    /// the `stop_set` of the parent function is reached.
+    fn check_depth_until(&mut self, stop_set: SyntaxSet) -> Option<&mut Self> {
+        if self.depth < MAX_DEPTH {
+            Some(self)
+        } else {
+            self.depth_check_error(Some(stop_set));
+            None
+        }
+    }
+
+    /// Check if the maximum depth has been exceeded. If so, generate an error
+    /// and try to make a best effort recovery. Otherwise increase the depth and
+    /// return a handle that automatically decreases it again when dropped.
+    fn increase_depth(&mut self) -> Option<impl DerefMut<Target = Self>> {
+        if self.depth < MAX_DEPTH {
+            self.depth += 1;
+            Some(defer(self, |p| p.depth -= 1))
+        } else {
+            self.depth_check_error(None);
+            None
+        }
+    }
+
+    /// Generate an error for an exceeded maximum depth check.
+    fn depth_check_error(&mut self, stop_set: Option<SyntaxSet>) {
+        let m = self.marker();
+
+        let mut balance: usize = 0;
+        // This function has to guarantee some sort of forward progress,
+        // otherwise the parser might loop indefinitely. One token is eaten in
+        // all cases, if that token is an opening delimiter, try to balance the
+        // opening and closing grouping delimiters before continuing.
+        self.with_nl_mode(AtNewline::Continue, |p| {
+            loop {
+                if p.at_set(syntax_set!(LeftBracket, LeftBrace, LeftParen)) {
+                    balance = balance.saturating_add(1);
+                } else if p.at_set(syntax_set!(RightBracket, RightBrace, RightParen)) {
+                    balance = balance.saturating_sub(1);
+                }
+                p.eat();
+
+                let at_stop = stop_set.is_none_or(|s| p.at_set(s));
+                if (balance == 0 && at_stop) || p.end() {
+                    break;
+                }
+            }
+        });
+
+        self.wrap_error(m, "maximum parsing depth exceeded");
     }
 }

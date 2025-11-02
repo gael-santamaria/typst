@@ -10,7 +10,8 @@ use ttf_parser::gsub::SubstitutionSubtable;
 use typst_library::World;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Smart, StyleChain};
-use typst_library::layout::{Abs, Dir, Em, Frame, FrameItem, Point, Size};
+use typst_library::layout::{Abs, Dir, Em, Frame, FrameItem, Point, Rel, Size};
+use typst_library::model::{JustificationLimits, ParElem};
 use typst_library::text::{
     Font, FontFamily, FontVariant, Glyph, Lang, Region, ShiftSettings, TextEdgeBounds,
     TextElem, TextItem, families, features, is_default_ignorable, language, variant,
@@ -88,11 +89,6 @@ impl<'a> Glyphs<'a> {
         Self { inner: Cow::Owned(glyphs), kept: 0..len }
     }
 
-    /// Whether this glyph collection is using the owned representation.
-    pub fn is_owned(&self) -> bool {
-        matches!(self.inner, Cow::Owned(_))
-    }
-
     /// Clone the internal glyph data to make it modifiable. Should be avoided
     /// if possible on potentially borrowed glyphs as it can be expensive
     /// (benchmarks have shown ~10% slowdown on a text-heavy document if no
@@ -168,7 +164,7 @@ pub struct ShapedGlyph {
     pub script: Script,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Adjustability {
     /// The left and right stretchability
     pub stretchability: (Em, Em),
@@ -226,13 +222,43 @@ impl ShapedGlyph {
             || self.c.is_ascii_digit()
     }
 
-    pub fn base_adjustability(&self, style: CjkPunctStyle) -> Adjustability {
+    /// The amount by which the glyph's advance width is allowed to be shrunk or
+    /// stretched to improve justification.
+    pub fn base_adjustability(
+        &self,
+        style: CjkPunctStyle,
+        limits: &JustificationLimits,
+        font_size: Abs,
+        stretchable: bool,
+    ) -> Adjustability {
         let width = self.x_advance;
+
+        // Do not ever shrink away more than three quarters of the glyph. As the
+        // width approaches zero, justification gets increasingly expensive and
+        // if negative it may not terminate.
+        let limited = |v: Em| v.min(width * 0.75);
+
         if self.is_space() {
+            // To a space, both the spacing and tracking limits apply, just like
+            // `text.tracking` and `text.spacing` both apply to spaces.
+            let max = limits.spacing().max + limits.tracking().max;
+            let min = limits.spacing().min + limits.tracking().min;
             Adjustability {
-                // The number for spaces is from Knuth-Plass' paper
-                stretchability: (Em::zero(), width / 2.0),
-                shrinkability: (Em::zero(), width / 3.0),
+                stretchability: (
+                    Em::zero(),
+                    (max - Rel::one())
+                        .map(|length| Em::from_length(length, font_size))
+                        .relative_to(width)
+                        .max(Em::zero()),
+                ),
+                shrinkability: (
+                    Em::zero(),
+                    limited(
+                        (Rel::one() - min)
+                            .map(|length| Em::from_length(length, font_size))
+                            .relative_to(width),
+                    ),
+                ),
             }
         } else if self.is_cjk_left_aligned_punctuation(style) {
             Adjustability {
@@ -248,6 +274,17 @@ impl ShapedGlyph {
             Adjustability {
                 stretchability: (Em::zero(), Em::zero()),
                 shrinkability: (width / 4.0, width / 4.0),
+            }
+        } else if stretchable {
+            Adjustability {
+                stretchability: (
+                    Em::zero(),
+                    Em::from_length(limits.tracking().max, font_size).max(Em::zero()),
+                ),
+                shrinkability: (
+                    Em::zero(),
+                    limited(Em::from_length(-limits.tracking().min, font_size)),
+                ),
             }
         } else {
             Adjustability::default()
@@ -320,41 +357,49 @@ impl<'a> ShapedText<'a> {
             let glyphs: Vec<Glyph> = group
                 .iter()
                 .map(|shaped: &ShapedGlyph| {
-                    let adjustability_left = if justification_ratio < 0.0 {
-                        shaped.shrinkability().0
-                    } else {
-                        shaped.stretchability().0
-                    };
-                    let adjustability_right = if justification_ratio < 0.0 {
-                        shaped.shrinkability().1
-                    } else {
-                        shaped.stretchability().1
-                    };
+                    // Whether the glyph is _not_ trimmed end-of-line
+                    // whitespace. Trimmed whitespace has its advance width and
+                    // offset zeroed out and is not taken into account for
+                    // justification.
+                    let kept = self.glyphs.kept.contains(&i);
 
-                    let justification_left = adjustability_left * justification_ratio;
-                    let mut justification_right =
-                        adjustability_right * justification_ratio;
-                    if shaped.is_justifiable() {
-                        justification_right +=
-                            Em::from_abs(extra_justification, glyph_size)
-                    }
+                    let (x_advance, x_offset) = if kept {
+                        let adjustability_left = if justification_ratio < 0.0 {
+                            shaped.shrinkability().0
+                        } else {
+                            shaped.stretchability().0
+                        };
+                        let adjustability_right = if justification_ratio < 0.0 {
+                            shaped.shrinkability().1
+                        } else {
+                            shaped.stretchability().1
+                        };
 
-                    frame.size_mut().x += justification_left.at(glyph_size)
-                        + justification_right.at(glyph_size);
+                        let justification_left = adjustability_left * justification_ratio;
+                        let mut justification_right =
+                            adjustability_right * justification_ratio;
+                        if shaped.is_justifiable() {
+                            justification_right +=
+                                Em::from_abs(extra_justification, glyph_size)
+                        }
+
+                        frame.size_mut().x += justification_left.at(glyph_size)
+                            + justification_right.at(glyph_size);
+
+                        (
+                            shaped.x_advance + justification_left + justification_right,
+                            shaped.x_offset + justification_left,
+                        )
+                    } else {
+                        (Em::zero(), Em::zero())
+                    };
+                    i += 1;
 
                     // We may not be able to reach the offset completely if
                     // it exceeds u16, but better to have a roughly correct
                     // span offset than nothing.
                     let mut span = spans.span_at(shaped.range.start);
                     span.1 = span.1.saturating_add(span_offset.saturating_as());
-
-                    // Zero out the advance if the glyph was trimmed.
-                    let x_advance = if self.glyphs.kept.contains(&i) {
-                        shaped.x_advance + justification_left + justification_right
-                    } else {
-                        Em::zero()
-                    };
-                    i += 1;
 
                     // |<---- a Glyph ---->|
                     //  -->|ShapedGlyph|<--
@@ -377,7 +422,7 @@ impl<'a> ShapedText<'a> {
                     Glyph {
                         id: shaped.glyph_id,
                         x_advance,
-                        x_offset: shaped.x_offset + justification_left,
+                        x_offset,
                         y_advance: Em::zero(),
                         y_offset: Em::zero(),
                         range: (shaped.range.start - range.start).saturating_as()
@@ -1176,9 +1221,18 @@ fn track_and_space(ctx: &mut ShapingContext) {
 /// and CJK punctuation adjustments according to Chinese Layout Requirements.
 fn calculate_adjustability(ctx: &mut ShapingContext, lang: Lang, region: Option<Region>) {
     let style = cjk_punct_style(lang, region);
+    let limits = ctx.styles.get(ParElem::justification_limits);
+    let font_size = ctx.size;
 
-    for glyph in &mut ctx.glyphs {
-        glyph.adjustability = glyph.base_adjustability(style);
+    let mut glyphs = ctx.glyphs.iter_mut().peekable();
+    while let Some(glyph) = glyphs.next() {
+        // Do not apply adjustability to a glyph if there is another one in the
+        // same cluster.
+        let stretchable =
+            glyphs.peek().is_none_or(|next| glyph.range.start != next.range.start);
+
+        glyph.adjustability =
+            glyph.base_adjustability(style, &limits, font_size, stretchable);
     }
 
     let mut glyphs = ctx.glyphs.iter_mut().peekable();
@@ -1259,7 +1313,7 @@ pub const END_PUNCT_PAT: &[char] = &[
     '〗', '〕', '］', '｝', '？', '！',
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum CjkPunctStyle {
     /// Standard GB/T 15834-2011, used mostly in mainland China.
     Gb,

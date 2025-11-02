@@ -404,16 +404,36 @@ pub struct TextElem {
     ///   language.
     /// - And all other things which are language-aware.
     ///
-    /// ```example
+    /// Choosing the correct language is important for accessibility. For
+    /// example, screen readers will use it to choose a voice that matches the
+    /// language of the text. If your document is in another language than
+    /// English (the default), you should set the text language at the start of
+    /// your document, before any other content. You can, for example, put it
+    /// right after the `[#set document(/* ... */)]` rule that [sets your
+    /// document's title]($document.title).
+    ///
+    /// If your document contains passages in a different language than the main
+    /// language, you should locally change the text language just for those parts,
+    /// either with a set rule [scoped to a block]($scripting/#blocks) or using
+    /// a direct text function call such as `[#text(lang: "de")[...]]`.
+    ///
+    /// If multiple codes are available for your language, you should prefer the
+    /// two-letter code (ISO 639-1) over the three-letter codes (ISO 639-2/3).
+    /// When you have to use a three-letter code and your language differs
+    /// between ISO 639-2 and ISO 639-3, use ISO 639-2 for PDF 1.7 (Typst's
+    /// default for PDF export) and below and ISO 639-3 for PDF 2.0 and HTML
+    /// export.
+    ///
+    /// The language code is case-insensitive, and will be lowercased when
+    /// accessed through [context]($context).
+    ///
+    /// ```example:"Setting the text language to German"
     /// #set text(lang: "de")
     /// #outline()
     ///
     /// = Einleitung
     /// In diesem Dokument, ...
     /// ```
-    ///
-    /// The language code is case-insensitive, and will be lowercased when
-    /// accessed through [context]($context).
     #[default(Lang::ENGLISH)]
     #[ghost]
     pub lang: Lang,
@@ -623,6 +643,11 @@ pub struct TextElem {
     /// #set text(ligatures: false)
     /// A fine ligature.
     /// ```
+    ///
+    /// Note that some programming fonts use other OpenType font features to
+    /// implement "ligatures," including the contextual alternates (`calt`)
+    /// feature, which is also enabled by default. Use the general
+    /// [`features`]($text.features) parameter to control such features.
     #[default(true)]
     #[ghost]
     pub ligatures: bool,
@@ -701,10 +726,18 @@ pub struct TextElem {
     /// - If given a dictionary mapping to numbers, sets the features
     ///   identified by the keys to the values.
     ///
-    /// ```example
+    /// ```example:"Give an array of strings"
     /// // Enable the `frac` feature manually.
     /// #set text(features: ("frac",))
     /// 1/2
+    /// ```
+    ///
+    /// ```example:"Give a dictionary mapping to numbers"
+    /// #set text(font: "Cascadia Code")
+    /// =>
+    /// // Disable the contextual alternates (`calt`) feature.
+    /// #set text(features: (calt: 0))
+    /// =>
     /// ```
     #[fold]
     #[ghost]
@@ -1128,7 +1161,7 @@ impl Resolve for TextDir {
 }
 
 /// A set of stylistic sets to enable.
-#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct StylisticSets(u32);
 
 impl StylisticSets {

@@ -232,7 +232,7 @@ A reference to it @fn
 // Error: 2-16 footnote cannot reference itself
 #footnote(<fn>) <fn>
 
---- footnote-ref-multiple ---
+--- footnote-ref-multiple render html ---
 // Multiple footnotes are refs
 First #footnote[A]<fn1> \
 Second #footnote[B]<fn2> \
@@ -389,3 +389,22 @@ C
 #set footnote.entry(separator: v(5em))
 
 #footnote[]
+
+--- footnote-custom-head-html html ---
+#html.html({
+  html.head()
+  html.body[
+    // Error: 12-32 footnotes are not currently supported in combination with a custom `<html>` or `<body>` element
+    // Hint: 12-32 you can still use footnotes with a custom footnote show rule
+    Hello #footnote[Footnote 1]
+  ]
+})
+
+--- footnote-custom-head-html-show-none html ---
+#show footnote: none
+#html.html({
+  html.head()
+  html.body[
+    Hello #footnote[Footnote 1]
+  ]
+})
